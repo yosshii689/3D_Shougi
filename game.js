@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id),E=Shogi;
 const lore={P:['足軽','素朴な兜と短槍を携えた、軍の基本部隊。','前へ1マス。成ると金と同じ動き。'],L:['長槍の突撃兵','長い槍を構え、一直線に戦線を突破する。','前方へ何マスでも。駒は飛び越せません。'],N:['騎兵','軍馬にまたがり、味方の頭上を跳び越える。','前へ2マス、左右へ1マスの位置に跳躍。'],S:['銀の隊長','銀鎧と細身の剣を持つ、俊敏な前線指揮官。','前3方向と斜め後ろへ1マス。'],G:['金の武将','黄金の重装鎧をまとい、王の側を守る。','斜め後ろ以外の6方向へ1マス。'],K:['軍の王','王冠と長いマントをまとった、軍の中心。','周囲8方向へ1マス。敵の利きには入れません。'],B:['大鳥の遊撃将','翼を広げた大鳥に乗り、上空から斜めに急襲。','斜めへ何マスでも。成ると縦横1マスも追加。'],R:['戦車将軍','四輪の重戦車を駆り、地上の戦線を切り開く。','縦横へ何マスでも。成ると斜め1マスも追加。']};
-let menuOpen=true;
+let menuOpen=true,cpuJob=null;
 let state=E.initial(),history=[E.copy(state)],records=[],selection=null,available=[],busy=false,ended='',lastMove=null,epoch=0,anim=null,sound=false,ctx=null,toastTimer,topView=false,angle=0,elevation=.94,distance=17.5;
 let scene,camera,renderer,units=new Map(),tiles=[],marks=[],sparks=[],raycaster,pointer,unitLayer,labelSprites=[];
 const colors=[0xc64f46,0x448fca],lightColors=[0xef8771,0x83c9ef],matCache=new Map(),geoCache=new Map(),labelCache=new Map();
@@ -88,13 +88,34 @@ function renderHands(){
   for(const g of reserveLayer.children)g.scale.setScalar(selection?.drop===g.userData.drop&&state.turn===g.userData.side ? .49:.43);
 }
 function renderUI(){$('menu').disabled=busy;document.querySelectorAll('.camera-tools button,.camera-tools input').forEach(el=>el.disabled=!!anim?.cinematic);$('mode').disabled=busy;let cpu=$('mode').value==='cpu'&&state.turn===1;$('move-count').textContent=`第 ${state.ply+1} 手`;$('turn-dot').style.background=state.turn===0?'var(--red)':'var(--blue)';$('turn-status').textContent=ended||`${state.turn===0?'赤':'青'}軍の手番${E.check(state,state.turn)?' · 王手':''}`;$('turn-hint').textContent=ended?'新しい対局で再出陣できます。':busy?(anim?.cinematic?'一騎打ち！ 捕獲した部隊は自軍の駒台へ。':'部隊が進軍しています…'):cpu?'青軍の将軍が作戦を考えています…':'ユニットを選んで、光るマスへ進軍。';$('undo').disabled=busy||history.length<2;$('resign').disabled=busy||!!ended;$('level').disabled=$('mode').value!=='cpu';renderHands();let log=$('log');log.replaceChildren();if(!records.length)log.innerHTML='<li class="empty">両軍、配置につく。<br>最初の一手を指しましょう。</li>';records.slice().reverse().forEach((r,j)=>{let li=document.createElement('li');li.innerHTML=`<em>${records.length-j}</em><span class="${r.side===0?'red':'blue'}-text">${r.side===0?'▲':'△'} ${r.text}</span><small>${r.detail}</small>`;log.append(li);});}
-function scheduleCPU(){if(menuOpen||ended||busy||$('mode').value!=='cpu'||state.turn!==1)return;let token=epoch;setTimeout(()=>{if(menuOpen||token!==epoch||busy||ended||$('mode').value!=='cpu'||state.turn!==1)return;if(document.querySelector('dialog[open]')){scheduleCPU();return;}let m=E.choose(state,Number($('level').value));if(m)execute(m);},400);}
+function scheduleCPU(){
+  if(menuOpen||ended||busy||$('mode').value!=='cpu'||state.turn!==1)return;
+  if(cpuJob?.token===epoch)return;
+  const job={token:epoch,key:E.key(state),level:Number($('level').value)};cpuJob=job;
+  const stale=()=>menuOpen||job.token!==epoch||busy||!!ended||$('mode').value!=='cpu'||state.turn!==1||E.key(state)!==job.key||Number($('level').value)!==job.level;
+  setTimeout(async()=>{
+    if(stale()){if(cpuJob===job)cpuJob=null;return;}
+    if(document.querySelector('dialog[open]')){if(cpuJob===job)cpuJob=null;scheduleCPU();return;}
+    let move=null;
+    try{
+      if(job.level<2)move=E.choose(state,job.level);
+      else{
+        $('turn-hint').textContent=(job.level===2?'上級':'最上級')+'CPUが先を読んでいます…';
+        const result=await ShogiAI.choose(state,job.level,{history,shouldCancel:stale});move=result.move;
+      }
+    }catch(error){console.error('CPU search failed',error);if(!stale()){notify('CPUの思考を再計算しました。');move=E.choose(state,1);}}
+    if(cpuJob===job)cpuJob=null;
+    if(stale())return;
+    if(document.querySelector('dialog[open]')){scheduleCPU();return;}
+    if(move&&E.legal(state).some(m=>(m.from===move.from)&&(m.drop===move.drop)&&m.to===move.to&&!!m.promote===!!move.promote))execute(move);
+  },400);
+}
 function save(){try{localStorage.setItem('gunki-save-v1',JSON.stringify({history,records,ended,mode:$('mode').value,level:$('level').value}));}catch{}}
-function load(){try{let data=JSON.parse(localStorage.getItem('gunki-save-v1'));if(!data||!Array.isArray(data.history)||!data.history.length||data.history.length>2000)return;if(!data.history.every(s=>s.board?.length===81&&s.hands?.length===2&&[0,1].includes(s.turn)))return;history=data.history;state=E.copy(history.at(-1));records=data.records||[];lastMove=records.at(-1)?.move||null;ended=data.ended||'';$('mode').value=data.mode==='local'?'local':'cpu';$('level').value=data.level==='0'?'0':'1';}catch{state=E.initial();history=[E.copy(state)];records=[];}}
+function load(){try{let data=JSON.parse(localStorage.getItem('gunki-save-v1'));if(!data||!Array.isArray(data.history)||!data.history.length||data.history.length>2000)return;if(!data.history.every(s=>s.board?.length===81&&s.hands?.length===2&&[0,1].includes(s.turn)))return;history=data.history;state=E.copy(history.at(-1));records=data.records||[];lastMove=records.at(-1)?.move||null;ended=data.ended||'';$('mode').value=data.mode==='local'?'local':'cpu';$('level').value=['0','1','2','3'].includes(String(data.level))?String(data.level):'1';}catch{state=E.initial();history=[E.copy(state)];records=[];}}
 function confirmAction(title,text,action){$('confirm-title').textContent=title;$('confirm-text').textContent=text;$('confirm').showModal();$('confirm-yes').onclick=()=>{$('confirm').close();action();};$('confirm-no').onclick=()=>$('confirm').close();}
 function newGame(){epoch++;cleanupCapture();if(anim){unitLayer.remove(anim.obj);anim=null;}busy=false;state=E.initial();history=[E.copy(state)];records=[];selection=null;available=[];lastMove=null;ended='';$('selected-unit').hidden=true;$('unit-name').textContent='';$('movement').textContent='';rebuild();renderUI();save();notify('両軍、配置完了。赤軍から出陣です。');}
 $('restart').onclick=()=>{if(history.length>1||busy)confirmAction('新しい対局を始めますか？','現在の対局を終了し、初期配置に戻します。',newGame);else newGame();};
-$('mode').onchange=()=>{epoch++;renderUI();save();scheduleCPU();};$('level').onchange=save;
+$('mode').onchange=()=>{epoch++;renderUI();save();scheduleCPU();};$('level').onchange=()=>{epoch++;save();scheduleCPU();};
 $('undo').onclick=()=>{if(busy||history.length<2)return;epoch++;history.pop();records.pop();if($('mode').value==='cpu'&&history.at(-1).turn===1&&history.length>1){history.pop();records.pop();}state=E.copy(history.at(-1));ended='';selection=null;available=[];lastMove=records.at(-1)?.move||null;rebuild();renderUI();save();notify('一手前の作戦に戻りました。');scheduleCPU();};
 $('resign').onclick=()=>confirmAction('投了しますか？',`${state.turn===0?'赤':'青'}軍が投了し、対局を終了します。`,()=>{epoch++;ended=`${state.turn===0?'青':'赤'}軍の勝利 · 投了`;selection=null;available=[];highlight();renderUI();save();notify(ended);});
 $('sound').onclick=()=>{sound=!sound;$('sound').textContent=sound?'音 ON':'音 OFF';$('sound').setAttribute('aria-pressed',sound);if(sound)beep('move');};$('help').onclick=()=>$('help-dialog').showModal();$('help-close').onclick=()=>$('help-dialog').close();
